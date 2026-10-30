@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "local-llm": {
+      "command": "uv",
+      "args": ["run", "--script", "${CLAUDE_PLUGIN_ROOT}/server/server.py"],
+      "env": { "REPO_ROOT": "${CLAUDE_PROJECT_DIR}" }
+    }
+  }
+}

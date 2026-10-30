@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "local-llm-kit",
+  "description": "Claude + local LLM coding workflow.",
+  "owner": { "name": "alankelsey" },
+  "plugins": [
+    {
+      "name": "local-llm-kit",
+      "description": "local-llm MCP server, ship-pr workflow and setup-project skill: Claude specs and verifies, a local Ollama model codes.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

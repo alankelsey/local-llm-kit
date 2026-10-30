@@ -168,22 +168,27 @@ Read node_modules docs.
 """
 
 
-def test_trim_conventions_drops_workflow_spec_pointer_and_nextjs_block():
+def test_trim_conventions_drops_workflow_and_nextjs_block_by_default():
     got = guards.trim_conventions(AGENTS, ["src/a.ts"])
-    assert got == "# Conventions\n\n## Stack\n- Next.js\n\n## Style\n- Small functions.\n"
+    assert got == (
+        "# Conventions\n\nGame spec: docs/Market_mock.md.\n\n## Stack\n- Next.js\n\n## Style\n- Small functions.\n"
+    )
 
 
-def test_trim_conventions_empty_for_non_typescript_targets():
+def test_trim_conventions_empty_for_targets_outside_conventions_for():
     assert guards.trim_conventions(AGENTS, ["tools/local-llm-mcp/server.py", "docs/x.md"]) == ""
     assert guards.trim_conventions(AGENTS, ["tools/x.py", "src/b.tsx"]) != ""
 
 
-def test_trim_conventions_on_real_agents_md_keeps_rules():
-    text = (Path(__file__).resolve().parents[2] / "AGENTS.md").read_text()
-    got = guards.trim_conventions(text, ["src/game/game.ts"])
-    assert "## Local model pitfalls" in got and "## Style" in got
-    assert "nextjs-agent-rules" not in got and "## Workflow" not in got and "Game spec:" not in got
-    assert len(got) < len(text)
+def test_trim_conventions_configurable_extensions_and_sections():
+    got = guards.trim_conventions(AGENTS, ["server/x.py"], for_ext=[".py"], skip_sections=["Stack", "Style"])
+    assert got == "# Conventions\n\nGame spec: docs/Market_mock.md.\n\n## Workflow\n- Claude writes specs.\n  See skill.\n"
+    assert guards.trim_conventions(AGENTS, ["src/a.ts"], for_ext=[".py"]) == ""
+
+
+def test_trim_conventions_no_skip_sections_keeps_all_sections():
+    got = guards.trim_conventions(AGENTS, ["src/a.ts"], skip_sections=[])
+    assert "## Workflow" in got and "## Stack" in got and "nextjs-agent-rules" not in got
 
 
 # --- malformed_blocks (PR 25) ------------------------------------------------------

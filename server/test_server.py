@@ -78,16 +78,22 @@ def test_escalation_prompt_keeps_last_8000_chars_of_errors():
 
 
 def test_escalation_cmd_shape():
-    cmd = server._escalation_cmd("PROMPT", ["src/a.ts", "src/b.ts"])
+    cmd = server._escalation_cmd("PROMPT", ["src/a.ts", "src/b.ts"], ["npm run -s lint", "uv run pytest -q", "npm run -s lint"])
     assert cmd == [
         "claude", "-p", "PROMPT",
         "--model", server.ESCALATE_MODEL,
         "--output-format", "json",
         "--max-budget-usd", str(server.ESCALATE_BUDGET_USD),
         "--permission-mode", "default",
-        "--allowedTools", "Read", "Grep", "Glob", "Bash(npm run *)", "Bash(npm test *)",
+        "--allowedTools", "Read", "Grep", "Glob",
+        "Bash(npm run -s lint)", "Bash(npm run -s lint *)", "Bash(uv run pytest -q)", "Bash(uv run pytest -q *)",
         "Edit(./src/a.ts)", "Edit(./src/b.ts)",
     ]
+
+
+def test_escalation_prompt_names_the_configured_check_commands():
+    p = server._escalation_prompt("T", ["a.py"], "E", ["uv run pytest -q", "ruff check ."])
+    assert "Run the failing checks (uv run pytest -q / ruff check .) to confirm." in p
 
 
 def test_parse_claude_json_success():
@@ -176,19 +182,118 @@ def test_iterate_no_escalation_when_passing_or_disabled(monkeypatch):
 
 # --- PR 24 wiring: conventions, code map, shrink guard, anchors ----------------
 
-def test_code_prompt_sends_trimmed_conventions_then_codemap_then_task():
+AGENTS_MD = "# Rules\n\n## Workflow\n- Claude only.\n\n## Local model pitfalls\n- Import everything.\n"
+
+
+def _project_repo(tmp_path, monkeypatch, config: dict | None = None):
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    files = {
+        "AGENTS.md": AGENTS_MD,
+        "src/game/rng.ts": "// Seeded RNG.\nexport function makeRng() {}\n",
+        "tools/x.py": "print(1)\n",
+    }
+    if config is not None:
+        files[".claude/local-llm.json"] = json.dumps(config)
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+
+
+def test_code_prompt_sends_trimmed_conventions_then_codemap_then_task(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch)
     p = server._code_prompt("THE TASK", ["src/game/rng.ts"], [])
-    assert "<codemap>\nsrc/" in p and "src/game/rng.ts — " in p
-    assert "## Local model pitfalls" in p
-    assert "nextjs-agent-rules" not in p and "## Workflow" not in p
+    assert "<codemap>\nsrc/game/rng.ts — Seeded RNG. · makeRng\n" in p
+    assert "## Local model pitfalls" in p and "## Workflow" not in p
     assert p.index("<conventions>") < p.index("<codemap>") < p.index("<task>\nTHE TASK")
 
 
-def test_code_prompt_for_python_targets_has_codemap_but_no_conventions():
-    # server.py's own source (sent as a target file) contains the text "<conventions>", so check the prompt start
-    p = server._code_prompt("T", ["tools/local-llm-mcp/server.py"], [])
+def test_code_prompt_for_targets_outside_conventions_for_has_codemap_but_no_conventions(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch)
+    p = server._code_prompt("T", ["tools/x.py"], [])
     assert p.startswith("<codemap>\nsrc/")
     assert "## Local model pitfalls" not in p
+
+
+def test_code_prompt_uses_configured_conventions_file_and_extensions(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"conventions": "docs/RULES.md", "conventions_for": [".py"], "conventions_skip": []})
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/RULES.md").write_text("## Python\n- Type hints.\n")
+    p = server._code_prompt("T", ["tools/x.py"], [])
+    assert p.startswith("<conventions>\n## Python\n- Type hints.\n")
+    assert "## Local model pitfalls" not in p
+
+
+def test_code_prompt_without_conventions_file(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"conventions": ""})
+    assert server._code_prompt("T", ["src/game/rng.ts"], []).startswith("<codemap>")
+
+
+def test_code_system_names_the_project_language():
+    s = server.code_system({"language": "TypeScript (Vite monorepo)"})
+    assert s.startswith("You are a senior software engineer working in a TypeScript (Vite monorepo) repo.\n")
+    assert "OUTPUT FORMAT (strict)" in s
+
+
+def test_auto_context_resolves_configured_aliases(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"aliases": {"@core/": "packages/sim-core/src/"}})
+    (tmp_path / "packages/sim-core/src").mkdir(parents=True)
+    (tmp_path / "packages/sim-core/src/tick.ts").write_text("export const t = 1;\n")
+    (tmp_path / "packages/sim-core/src/index.ts").write_text("export * from './tick';\n")
+    (tmp_path / "app.ts").write_text(
+        "import { t } from '@core/tick';\nimport * as core from '@core';\nimport { r } from './src/game/rng';\n"
+    )
+    assert server._auto_context(["app.ts"], []) == ["packages/sim-core/src/tick.ts", "src/game/rng.ts"]
+
+
+def test_auto_context_default_alias_is_at_slash_to_src(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch)
+    (tmp_path / "src/app.ts").write_text("import { makeRng } from '@/game/rng';\n")
+    assert server._auto_context(["src/app.ts"], []) == ["src/game/rng.ts"]
+
+
+def test_run_checks_runs_configured_commands_in_root(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {
+        "checks": {"ok": "true", "bad": "echo boom >&2; exit 3", "unit": "printf '%s\\n' args:"},
+        "test_check": "unit",
+    })
+    assert server._run_checks(["ok"], []) == (True, "")
+    ok, err = server._run_checks(["ok", "bad"], [])
+    assert not ok and err == "### bad: echo boom >&2; exit 3\nboom"
+    (tmp_path / "pwd.sh").write_text("pwd; exit 1\n")
+    _project_repo(tmp_path, monkeypatch, {"checks": {"where": "sh pwd.sh"}})
+    assert server._run_checks(["where"], []) == (False, f"### where: sh pwd.sh\n{tmp_path}")
+
+
+def test_run_checks_lint_warnings_fail(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"checks": {"lint": "echo '1 warning'"}})
+    ok, err = server._run_checks(["lint"], [])
+    assert not ok and "1 warning" in err
+
+
+def test_run_checks_appends_test_filter_to_test_check(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"checks": {"test": "echo got; false"}})
+    ok, err = server._run_checks(["test"], ["a b.ts"])
+    assert err == "### test: echo got; false 'a b.ts'\ngot"
+
+
+def test_default_checks_come_from_project(tmp_path, monkeypatch):
+    _project_repo(tmp_path, monkeypatch, {"default_checks": ["unit"]})
+    assert server._default_checks() == ["unit"]
+
+
+def test_settings_default_path_comes_from_project_settings_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    monkeypatch.setenv("LOCAL_LLM_SETTINGS", str(tmp_path / "machine.json"))
+    monkeypatch.delenv("LOCAL_MODEL", raising=False)
+    (tmp_path / "machine.json").write_text(json.dumps({"model": "from-machine"}))
+    assert server._settings()["model"] == "from-machine"
+
+
+def test_git_changed_runs_in_the_given_root(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "new.txt").write_text("x")
+    assert server._git_changed(tmp_path) == {"new.txt"}
 
 
 def _repo(tmp_path, monkeypatch, files: dict[str, str]):

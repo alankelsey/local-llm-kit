@@ -1,0 +1,4 @@
+.llm-logs/
+.tasks/
+__pycache__/
+.dev/

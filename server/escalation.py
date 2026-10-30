@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 from typing import Any
 
 
@@ -11,7 +12,7 @@ ESCALATE_BUDGET_USD = float(os.environ.get("LOCAL_ESCALATE_BUDGET_USD", "1.0"))
 ESCALATE_TIMEOUT_S = float(os.environ.get("LOCAL_ESCALATE_TIMEOUT_S", "900"))
 
 
-def _escalation_prompt(task: str, target_files: list[str], errors: str) -> str:
+def _escalation_prompt(task: str, target_files: list[str], errors: str, check_cmds: list[str] | None = None) -> str:
     """Return the prompt text for Claude escalation."""
     lines = [
         "A local model could not make these checks pass. Fix the root cause with the smallest change.",
@@ -26,12 +27,13 @@ def _escalation_prompt(task: str, target_files: list[str], errors: str) -> str:
         errors = errors[-8000:]
     lines.append(f"<failures>\n{errors}\n</failures>")
 
-    lines.append("Run the failing checks (npm run lint / npm run typecheck / npm test) to confirm. Finish with 1-3 lines: root cause, what you changed.")
+    cmds = check_cmds or ["npm run lint", "npm run typecheck", "npm test"]
+    lines.append(f"Run the failing checks ({' / '.join(cmds)}) to confirm. Finish with 1-3 lines: root cause, what you changed.")
 
     return "\n\n".join(lines)
 
 
-def _escalation_cmd(prompt: str, target_files: list[str]) -> list[str]:
+def _escalation_cmd(prompt: str, target_files: list[str], check_cmds: list[str]) -> list[str]:
     """Return the command to invoke claude -p with the escalation prompt."""
     cmd = [
         "claude",
@@ -49,9 +51,14 @@ def _escalation_cmd(prompt: str, target_files: list[str]) -> list[str]:
         "Read",
         "Grep",
         "Glob",
-        "Bash(npm run *)",
-        "Bash(npm test *)",
     ]
+    # Add Bash commands for each check (skip duplicates, keep order)
+    seen: set[str] = set()
+    for c in check_cmds:
+        if c not in seen:
+            cmd.append(f"Bash({c})")
+            cmd.append(f"Bash({c} *)")
+            seen.add(c)
     for t in target_files:
         cmd.extend([f"Edit(./{t})"])
     return cmd

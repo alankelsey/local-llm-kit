@@ -92,25 +92,35 @@ def round_problems(code_report: str) -> str:
     )
 
 
-def trim_conventions(text: str, target_files: list[str]) -> str:
-    if not any(f.endswith((".ts", ".tsx")) for f in target_files):
+def trim_conventions(
+    text: str,
+    target_files: list[str],
+    for_ext: tuple[str, ...] = (".ts", ".tsx"),
+    skip_sections: tuple[str, ...] = ("Workflow",),
+) -> str:
+    for_ext = tuple(for_ext)
+    if not any(f.endswith(for_ext) for f in target_files):
         return ""
+
     begin, end = "<!-- BEGIN:nextjs-agent-rules -->", "<!-- END:nextjs-agent-rules -->"
     s = text
     b, e = s.find(begin), s.find(end)
     if b != -1 and e != -1 and e > b:
         s = s[:b] + s[e + len(end):]
+
     out: list[str] = []
     skipping = False
     for line in s.split("\n"):
-        if line == "## Workflow":
+        if skipping:
+            if line.startswith("## "):
+                skipping = False
+            else:
+                continue
+        if any(line == f"## {name}" for name in skip_sections):
             skipping = True
             continue
-        if skipping and line.startswith("## "):
-            skipping = False
-        if not skipping:
-            out.append(line)
+        out.append(line)
+
     s = "\n".join(out)
-    s = re.sub(r"^Game spec:.*\n?", "", s, flags=re.M)
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip() + "\n"

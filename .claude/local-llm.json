@@ -1,0 +1,13 @@
+{
+  "language": "Python 3.11 (MCP server; stdlib + mcp + httpx; pytest)",
+  "conventions": "AGENTS.md",
+  "conventions_for": [".py"],
+  "conventions_skip": ["Workflow"],
+  "codemap": { "roots": [] },
+  "aliases": {},
+  "checks": {
+    "test": "uv run --with pytest --with 'mcp>=1.9,<2' --with httpx pytest -q -p no:cacheprovider"
+  },
+  "default_checks": ["test"],
+  "test_check": "test"
+}

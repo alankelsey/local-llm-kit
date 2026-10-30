@@ -34,6 +34,7 @@ from escalation import (
     _outside_changes,
     _parse_claude_json,
 )
+from project import check_command, load_project, settings_path
 
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -64,11 +65,15 @@ def _repo_root() -> Path:
 
 ROOT = _repo_root()
 LOG_DIR = ROOT / ".llm-logs"
-SETTINGS_FILE = ROOT / ".dev" / "local-llm.json"
+
+
+def _project() -> dict:
+    """Load the project config fresh on each use."""
+    return load_project(ROOT)
 
 
 def _settings(path: Path | None = None) -> dict:
-    """{"model", "num_ctx", "fallback_model"}: SETTINGS_FILE (or `path`), then env LOCAL_MODEL/LOCAL_NUM_CTX/LOCAL_FALLBACK_MODEL, then defaults ("" = no fallback)."""
+    """{"model", "num_ctx", "fallback_model"}: settings_path(ROOT) (or `path`), then env LOCAL_MODEL/LOCAL_NUM_CTX/LOCAL_FALLBACK_MODEL, then defaults ("" = no fallback)."""
     model = os.environ.get("LOCAL_MODEL", DEFAULT_MODEL)
     num_ctx_str = os.environ.get("LOCAL_NUM_CTX", str(DEFAULT_NUM_CTX))
     fallback_model = os.environ.get("LOCAL_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
@@ -77,7 +82,7 @@ def _settings(path: Path | None = None) -> dict:
     except ValueError:
         num_ctx = DEFAULT_NUM_CTX
 
-    p = path or SETTINGS_FILE
+    p = path or settings_path(ROOT)
     if p.exists():
         try:
             data = json.loads(p.read_text())
@@ -103,7 +108,7 @@ def _settings(path: Path | None = None) -> dict:
 
 mcp = FastMCP("local-llm")
 
-CODE_SYSTEM = """You are a senior TypeScript/React engineer working in a Next.js + Vitest repo.
+CODE_SYSTEM = """You are a senior software engineer working in a {language} repo.
 You receive a task, project conventions, and the current contents of relevant files.
 Write complete, working, idiomatic code. No placeholders, no TODOs, no elided sections.
 Import every symbol you use.
@@ -137,11 +142,17 @@ Output nothing outside these blocks. Do not wrap content in markdown fences.
 Write each file exactly once, then stop. Never output a second version of a file.
 Only write the files listed as writable; other files are read-only context."""
 
+
+def code_system(project: dict) -> str:
+    """Return CODE_SYSTEM with {language} replaced by project["language"]."""
+    return CODE_SYSTEM.replace("{language}", project["language"])
+
+
 REVIEW_SYSTEM = """You are a meticulous code reviewer. Review the diff for real defects:
 correctness bugs, spec violations, broken edge cases, missing tests for important logic,
 type errors, React state bugs, accessibility problems, and needless complexity.
 Do not report style nits or praise. Every finding must name a concrete failure scenario.
-Judge against this repo's stated environment (AGENTS.md / README: one Linux box, 2x AMD GPUs, local dev).
+Judge against this repo's stated environment (its conventions file / README).
 Portability to other OSes, GPUs, CI images or hardware is out of scope, and so are deliberate design
 choices that are documented in comments or the spec.
 For each finding, `evidence` must be one line of code copied EXACTLY from the file as it is now
@@ -203,9 +214,16 @@ def _read_files(paths: list[str]) -> str:
 
 
 def _conventions(target_files: list[str] | None = None) -> str:
-    """AGENTS.md minus what the local model can't act on; None keeps the TypeScript rules (review)."""
-    p = ROOT / "AGENTS.md"
-    return trim_conventions(p.read_text(), target_files or ["review.ts"]) if p.exists() else ""
+    """Project conventions file minus skipped sections; None targets = review (always included)."""
+    pr = _project()
+    if not pr["conventions"]:
+        return ""
+    conv_path = ROOT / pr["conventions"]
+    if not conv_path.exists():
+        return ""
+    text = conv_path.read_text(errors="replace")
+    targets = target_files or ["review" + pr["conventions_for"][0]] if pr["conventions_for"] else []
+    return trim_conventions(text, targets, tuple(pr["conventions_for"]), tuple(pr["conventions_skip"]))
 
 
 def _chat(
@@ -309,7 +327,7 @@ def local_code(
     fetched: list[str] = []
     for _ in range(MAX_NEED_ROUNDS + 1):
         prompt = _code_prompt(task, target_files, context_files)
-        data = _chat(CODE_SYSTEM, prompt, model=model)
+        data = _chat(code_system(_project()), prompt, model=model)
         log = _log("code", prompt, data)
         content = data.get("message", {}).get("content", "")
         needs = [n for n in NEED_RE.findall(content) if n not in context_files and n not in target_files]
@@ -362,20 +380,45 @@ def _safe_exists(rel: str) -> bool:
         return False
 
 
-IMPORT_RE = re.compile(r"""^\s*import\s[^'"]*?from\s+['"]((?:\.{1,2}/|@/)[^'"]+)['"]""", re.M)
+IMPORT_RE = re.compile(r"""^\s*import\s[^'"]*?from\s+['"]([^'"]+)['"]""", re.M)
 
 
 def _auto_context(target_files: list[str], context_files: list[str]) -> list[str]:
     """Local modules imported by the target files, so the model sees real types instead of guessing."""
+    pr = _project()
     found: list[str] = []
     for rel in target_files:
         p = _safe_path(rel)
         if not p.is_file():
             continue
         for spec in IMPORT_RE.findall(p.read_text(errors="replace")):
-            base = (ROOT / "src" / spec[2:]) if spec.startswith("@/") else (p.parent / spec)
-            for cand in (base, *(base.with_name(base.name + ext) for ext in (".ts", ".tsx")),
-                         base / "index.ts", base / "index.tsx"):
+            # Resolve alias first (longest key first), then relative, then bare module name.
+            resolved: Path | None = None
+            # Check aliases (sorted by length descending to match longest prefix)
+            is_bare_alias = False
+            for alias_key in sorted(pr["aliases"].keys(), key=len, reverse=True):
+                if spec == alias_key.rstrip("/"):
+                    # Bare alias import like "@core" with no path → skip (no specific file requested)
+                    is_bare_alias = True
+                    break
+                elif spec.startswith(alias_key):
+                    resolved = ROOT / pr["aliases"][alias_key] / spec[len(alias_key):]
+                    break
+            if is_bare_alias:
+                continue
+            # Relative import (./ or ../)
+            if spec.startswith("./") or spec.startswith("../"):
+                resolved = p.parent / spec
+            # Bare module name not handled by aliases above → skip
+            if resolved is None:
+                continue
+            base = resolved
+            candidates = [base]
+            for ext in pr["codemap"]["extensions"]:
+                candidates.append(base.with_name(base.name + ext))
+            for ext in pr["codemap"]["extensions"]:
+                candidates.append(base / ("index" + ext))
+            for cand in candidates:
                 if cand.is_file():
                     r = str(cand.resolve().relative_to(ROOT))
                     if r not in target_files and r not in context_files and r not in found:
@@ -466,20 +509,24 @@ def _apply_output(content: str, target_files: list[str], allow_other_files: bool
     return res
 
 
+def _default_checks() -> list[str]:
+    """Return the configured default checks for this project."""
+    return list(_project()["default_checks"])
+
+
 def _run_checks(checks: list[str], test_filter: list[str]) -> tuple[bool, str]:
-    """Run npm scripts; return (all_passed, trimmed error output of failing ones)."""
+    """Run the project's check commands; return (all_passed, trimmed error output of failing ones)."""
+    pr = _project()
     failures = []
     for name in checks:
-        cmd = ["npm", "run", "-s", name]
-        if name == "test" and test_filter:
-            cmd += ["--", *test_filter]
-        r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
+        cmd_str = check_command(pr, name, test_filter)
+        r = subprocess.run(cmd_str, shell=True, cwd=ROOT, capture_output=True, text=True, timeout=600)
         out = (r.stdout + r.stderr).strip()
         # lint warnings count as failures so the model cleans them up too
         failed = r.returncode != 0 or (name == "lint" and "warning" in out)
         if failed:
             lines = [l for l in out.splitlines() if l.strip() and "node_modules" not in l]
-            failures.append(f"### npm run {name}\n" + "\n".join(lines[-60:]))
+            failures.append(f"### {name}: {cmd_str}\n" + "\n".join(lines[-60:]))
     return not failures, "\n\n".join(failures)
 
 
@@ -493,15 +540,16 @@ def _error_signature(errors: str) -> frozenset[str]:
     return frozenset(sig)
 
 
-def _git_changed() -> set[str]:
+def _git_changed(root: Path | None = None) -> set[str]:
     """Return repo-relative paths from git status --porcelain."""
+    cwd = root or ROOT
     try:
         proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=ROOT,
+            cwd=cwd,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return set()
@@ -608,8 +656,10 @@ def _fix_rounds(
 def _escalate(task: str, target_files: list[str], errors: str) -> dict:
     """Hand the remaining failures to Claude Code and parse its response."""
     before = _git_changed()
-    prompt = _escalation_prompt(task, target_files, errors)
-    cmd = _escalation_cmd(prompt, target_files)
+    pr = _project()
+    cmds = [check_command(pr, n, []) for n in _default_checks()]
+    prompt = _escalation_prompt(task, target_files, errors, cmds)
+    cmd = _escalation_cmd(prompt, target_files, cmds)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=ESCALATE_TIMEOUT_S, cwd=ROOT)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -638,7 +688,7 @@ def local_iterate(
 ) -> str:
     """Write files with the local LLM, then loop: run checks, feed failures back, fix — until green.
 
-    checks: npm scripts to run (default lint, typecheck, test). test_filter: vitest path filters.
+    checks: names from the project's "checks" config (default: its "default_checks"). test_filter: paths appended to the test check.
     skip_first_write: True to start by checking the files already on disk (fix-only mode).
     anchors: "path: exact existing line" spots the task must change; a round fails while one is untouched,
     and so does a round whose edits failed to apply or whose whole-file write was refused.
@@ -647,7 +697,7 @@ def local_iterate(
     Each fix round sees the earlier rounds' errors and notes. If the same failure comes back twice in a row,
     the loop stops early with STUCK so Claude can step in instead of burning rounds.
     """
-    checks = checks or ["lint", "typecheck", "test"]
+    checks = checks or _default_checks()
     test_filter = test_filter or []
     anchors = anchors or []
     originals = _anchor_texts(anchors)
@@ -836,10 +886,11 @@ def local_status() -> str:
     vram = "\n".join(_vram_lines()) or "(no amdgpu VRAM counters found)"
     s = _settings()
     fb = s.get("fallback_model") or "off"
-    state = "present" if SETTINGS_FILE.exists() else "absent"
+    sf = settings_path(ROOT)
+    state = "present" if sf.exists() else "absent"
     return (
-        f"configured model: {s['model']} num_ctx={s['num_ctx']} fallback={fb}\nsettings: {SETTINGS_FILE} ({state})\n"
-        + "\n".join(models) + "\n" + vram
+        f"configured model: {s['model']} num_ctx={s['num_ctx']} fallback={fb}\nsettings: {sf} ({state})\n"
+        + "\n".join(models) + "\n" + vram + f"\nproject: {ROOT} (config {'present' if (ROOT / '.claude/local-llm.json').exists() else 'defaults'})"
     )
 
 

@@ -1,7 +1,9 @@
-"""Compact map of src/: one line per source file with its purpose and exports."""
+"""Compact map of a project's source files (roots from .claude/local-llm.json): one line per file with its purpose and exports."""
 import re
 import sys
 from pathlib import Path
+
+from project import load_project
 
 
 def describe(text: str) -> str:
@@ -48,8 +50,8 @@ def exports(text: str) -> list[str]:
     matches = pattern.findall(text)
 
     # Remove duplicates while preserving order
-    seen = set()
-    result = []
+    seen: set[str] = set()
+    result: list[str] = []
     for name in matches:
         if name not in seen:
             seen.add(name)
@@ -58,34 +60,43 @@ def exports(text: str) -> list[str]:
     return result
 
 
-def source_files(root: Path) -> list[Path]:
-    src_dir = root / "src"
-    if not src_dir.exists():
-        return []
+def source_files(
+    root: Path,
+    roots: list[str] | None = None,
+    extensions: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> list[Path]:
+    if roots is None:
+        roots = ["src"]
+    if extensions is None:
+        extensions = [".ts", ".tsx"]
+    if exclude is None:
+        exclude = [".test.", ".d.ts"]
 
-    paths = []
-    for p in src_dir.rglob("*"):
-        if p.is_file():
-            name = p.name
-            # Exclude .test. and .d.ts
-            if ".test." in name:
+    seen: set[Path] = set()
+    for entry in roots:
+        for matched in root.glob(entry):
+            if not matched.is_dir():
                 continue
-            if name.endswith(".d.ts"):
-                continue
-            if name.endswith(".ts") or name.endswith(".tsx"):
-                paths.append(p)
+            for f in matched.rglob("*"):
+                if not f.is_file():
+                    continue
+                name = f.name
+                if any(name.endswith(ext) for ext in extensions):
+                    if not any(exc in name for exc in exclude):
+                        seen.add(f)
 
-    # Sort by relative path as posix string
-    paths.sort(key=lambda p: p.relative_to(root).as_posix())
-    return paths
+    return sorted(seen, key=lambda p: p.relative_to(root).as_posix())
 
 
-def build_codemap(root: Path) -> str:
-    files = source_files(root)
+def build_codemap(root: Path, project: dict | None = None) -> str:
+    project = project or load_project(root)
+    cm = project["codemap"]
+    files = source_files(root, roots=cm["roots"], extensions=cm["extensions"], exclude=cm["exclude"])
     if not files:
         return ""
 
-    lines = []
+    lines: list[str] = []
     for p in files:
         rel = p.relative_to(root).as_posix()
         text = p.read_text()
@@ -101,9 +112,11 @@ def build_codemap(root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def missing_descriptions(root: Path) -> list[str]:
-    files = source_files(root)
-    missing = []
+def missing_descriptions(root: Path, project: dict | None = None) -> list[str]:
+    project = project or load_project(root)
+    cm = project["codemap"]
+    files = source_files(root, roots=cm["roots"], extensions=cm["extensions"], exclude=cm["exclude"])
+    missing: list[str] = []
 
     for p in files:
         text = p.read_text()
@@ -116,21 +129,31 @@ def missing_descriptions(root: Path) -> list[str]:
 
 
 def main(argv: list[str], root: Path | None = None) -> int:
+    # Parse --root from argv (takes precedence over the root argument)
+    if "--root" in argv:
+        idx = argv.index("--root")
+        if idx + 1 < len(argv):
+            root = Path(argv[idx + 1])
+
     if root is None:
-        root = Path(__file__).resolve().parents[2]
+        root = Path.cwd()
+
+    project = load_project(root)
 
     if "--check" in argv:
-        missing = missing_descriptions(root)
+        missing = missing_descriptions(root, project)
         if missing:
             print("files without a one-line header comment:")
             for p in missing:
                 print(f"  {p}")
             return 1
         else:
-            print(f"codemap ok ({len(source_files(root))} files)")
+            cm = project["codemap"]
+            files = source_files(root, roots=cm["roots"], extensions=cm["extensions"], exclude=cm["exclude"])
+            print(f"codemap ok ({len(files)} files)")
             return 0
     else:
-        print(build_codemap(root), end="")
+        print(build_codemap(root, project), end="")
         return 0
 
 

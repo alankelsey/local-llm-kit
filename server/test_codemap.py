@@ -80,3 +80,62 @@ def test_main_prints_map(tmp_path, capsys):
     root = _tree(tmp_path)
     assert codemap.main([], root=root) == 0
     assert capsys.readouterr().out == codemap.build_codemap(root)
+
+
+# --- project config (kit) ----------------------------------------------------
+
+def _monorepo(tmp_path: Path) -> Path:
+    files = {
+        "packages/sim-core/src/tick.ts": "// Advances the sim one tick.\nexport function tick() {}\n",
+        "packages/sim-core/src/tick.test.ts": "// tests\n",
+        "packages/client/src/App.tsx": "// Root UI.\nexport function App() {}\n",
+        "packages/client/src/worker.js": "// not listed\n",
+        "packages/content/data.json": "{}\n",
+        "src/legacy.ts": "// outside the configured roots\n",
+        "tools/gen.mts": "// Generates content.\nexport const run = 1;\n",
+    }
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return tmp_path
+
+
+def test_source_files_globs_roots_and_uses_extensions_and_excludes(tmp_path):
+    root = _monorepo(tmp_path)
+    got = codemap.source_files(root, roots=["packages/*/src", "tools"], extensions=[".ts", ".tsx", ".mts"], exclude=[".test."])
+    assert [p.relative_to(root).as_posix() for p in got] == [
+        "packages/client/src/App.tsx",
+        "packages/sim-core/src/tick.ts",
+        "tools/gen.mts",
+    ]
+
+
+def test_source_files_defaults_are_src_ts_tsx(tmp_path):
+    root = _monorepo(tmp_path)
+    assert [p.relative_to(root).as_posix() for p in codemap.source_files(root)] == ["src/legacy.ts"]
+
+
+def test_source_files_missing_roots_and_no_roots(tmp_path):
+    assert codemap.source_files(tmp_path, roots=["nope/*/src", "missing"]) == []
+    assert codemap.source_files(_monorepo(tmp_path), roots=[]) == []
+
+
+def test_build_codemap_and_check_read_the_project_config(tmp_path, capsys):
+    root = _monorepo(tmp_path)
+    (root / ".claude").mkdir()
+    (root / ".claude/local-llm.json").write_text('{"codemap": {"roots": ["packages/*/src"]}}')
+    assert codemap.build_codemap(root) == (
+        "packages/client/src/App.tsx — Root UI. · App\n"
+        "packages/sim-core/src/tick.ts — Advances the sim one tick. · tick\n"
+    )
+    assert codemap.missing_descriptions(root) == []
+    assert codemap.main(["--check", "--root", str(root)]) == 0
+    assert capsys.readouterr().out == "codemap ok (2 files)\n"
+
+
+def test_main_root_defaults_to_cwd(tmp_path, capsys, monkeypatch):
+    root = _tree(tmp_path)
+    monkeypatch.chdir(root)
+    assert codemap.main([]) == 0
+    assert capsys.readouterr().out == codemap.build_codemap(root)

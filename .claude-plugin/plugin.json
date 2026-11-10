@@ -1,6 +1,6 @@
 {
   "name": "local-llm-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude plans and verifies, a local Ollama model writes the code: local-llm MCP server (code/iterate/review/ask), ship-pr workflow and per-project setup.",
   "author": { "name": "alankelsey" },
   "homepage": "https://github.com/alankelsey/local-llm-kit",

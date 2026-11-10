@@ -43,7 +43,7 @@ DEFAULT_MODEL = "qwen3.8:27b"
 DEFAULT_NUM_CTX = 262144
 DEFAULT_FALLBACK_MODEL = "qwen3.5:122b-a10b"
 FALLBACK_ROUNDS = 3
-NUM_PREDICT = int(os.environ.get("LOCAL_NUM_PREDICT", "16384"))
+NUM_PREDICT = int(os.environ.get("LOCAL_NUM_PREDICT", "32768"))
 TIMEOUT_S = float(os.environ.get("LOCAL_TIMEOUT_S", "1200"))
 # ~4 chars/token: 600k chars of context files is ~150k tokens, leaving room for output in a 256k window.
 MAX_CONTEXT_CHARS = int(os.environ.get("LOCAL_MAX_CONTEXT_CHARS", "600000"))
@@ -772,7 +772,7 @@ def local_review(base: str = "main", focus: str = "", context_files: list[str] |
         ]
         if s
     )
-    data = _chat(REVIEW_SYSTEM, prompt, fmt=REVIEW_SCHEMA, temperature=0.2, num_predict=4096)
+    data = _chat(REVIEW_SYSTEM, prompt, fmt=REVIEW_SCHEMA, temperature=0.2, num_predict=NUM_PREDICT)
     log = _log("review", prompt, data)
     content = data.get("message", {}).get("content", "")
     kept, dropped = _check_evidence(content)
@@ -812,7 +812,7 @@ def _verify_findings(findings: list[dict], focus: str) -> tuple[list[dict], list
             (f"<spec>\n{focus}\n</spec>\n\n" if focus else "")
             + f"{file_text}\n\n<claim>\n{json.dumps(claim, indent=2)}\n</claim>"
         )
-        data = _chat(VERIFY_SYSTEM, user, fmt=VERIFY_SCHEMA, temperature=0.1, num_predict=1024)
+        data = _chat(VERIFY_SYSTEM, user, fmt=VERIFY_SCHEMA, temperature=0.1, num_predict=NUM_PREDICT)
         try:
             verdict = json.loads(data.get("message", {}).get("content", ""))
         except json.JSONDecodeError:

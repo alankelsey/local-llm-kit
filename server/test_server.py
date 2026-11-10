@@ -525,3 +525,34 @@ def test_apply_output_refuses_file_write_with_stray_tags(tmp_path, monkeypatch):
     res = server._apply_output('<file path="n.py">\nx = 1\n</edit>\ny = 2\n</file>', ["n.py"], False)
     assert res["written"] == [] and len(res["refused"]) == 1
     assert not (tmp_path / "n.py").exists()
+
+
+def test_output_limit_defaults_to_32k():
+    import os
+
+    assert server.NUM_PREDICT == int(os.environ.get("LOCAL_NUM_PREDICT", "32768"))
+
+
+def test_review_and_verify_use_the_configured_output_limit(tmp_path, monkeypatch):
+    import subprocess
+
+    _repo(tmp_path, monkeypatch, {"a.py": "x = 1\n"})
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("x = 2\n")
+    monkeypatch.setattr(server, "NUM_PREDICT", 40000)
+    seen = []
+    finding = {"file": "a.py", "line": 1, "evidence": "x = 2", "summary": "s", "failure_scenario": "f"}
+
+    def fake_chat(system, prompt, **k):
+        seen.append(k.get("num_predict"))
+        if system == server.VERIFY_SYSTEM:
+            return {"message": {"content": json.dumps({"valid": True, "reason": "r"})}}
+        return {"message": {"content": json.dumps({"findings": [finding]})}}
+
+    monkeypatch.setattr(server, "_chat", fake_chat)
+    monkeypatch.setattr(server, "_log", lambda *a, **k: "log.md")
+    monkeypatch.setattr(server, "_metric", lambda *a, **k: None)
+    server.local_review(base="HEAD")
+    assert seen == [40000, 40000]

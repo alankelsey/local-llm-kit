@@ -54,6 +54,9 @@ Per-project config is `.claude/local-llm.json`. Missing keys fall back to the Ty
 `uv run --script server/cli.py {status|code|iterate|fix|review|ask}` from inside a project
 (`REPO_ROOT` overrides the git top level). Logs and metrics go to `<project>/.llm-logs/`.
 
+## Remote access
+Watch and drive Grok, Claude Code, or `llm` from a phone over Tailscale SSH and tmux: [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md).
+
 ## Developing the kit
 `uv run --with pytest --with 'mcp>=1.9,<2' --with httpx pytest -q server`. The kit is configured for itself
 (`.claude/local-llm.json`, `AGENTS.md`), so the plugin can work on its own code. History, benchmarks and the

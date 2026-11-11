@@ -16,9 +16,8 @@ planned pipeline behavior, not evidence that it has been implemented.
 
 ## Source and assumptions
 
-Retrieved the Google Doc [tailscale](https://docs.google.com/document/d/13VrMutuJqSuVxlFionCoB0-OyuHWhzXML9suDRi0sg0/edit)
-from Drive / LocalAi. Its text is saved in [tailscale-source.txt](tailscale-source.txt).
-This is a readable text copy of the native document, with line endings normalized.
+Source: the owner's Google Doc "tailscale" in Drive / LocalAi. A text copy is kept there as "tailscale connect",
+not in this repo.
 
 Assume the existing Ubuntu GPU machine remains the execution host, with Android
 and a laptop as clients. Confirm actual hostnames, Linux username, tailnet identity,
